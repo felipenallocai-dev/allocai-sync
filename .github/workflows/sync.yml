@@ -1,0 +1,38 @@
+name: AllocAI Sync
+
+on:
+  schedule:
+    # Dia: a cada 15 min das 07h às 19h (horário Brasília = UTC-3)
+    - cron: '0,15,30,45 10-21 * * *'
+    # Noite: a cada 60 min das 19h às 07h
+    - cron: '0 0-9,22-23 * * *'
+  workflow_dispatch: # permite rodar manualmente
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Instalar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependências
+        run: |
+          pip install supabase==2.15.0 python-dotenv playwright
+          playwright install chromium --with-deps
+
+      - name: Criar .env
+        run: |
+          echo "SUPABASE_URL=${{ secrets.SUPABASE_URL }}" > .env
+          echo "SUPABASE_KEY=${{ secrets.SUPABASE_KEY }}" >> .env
+          echo "CIDNEFRO_URL=${{ secrets.CIDNEFRO_URL }}" >> .env
+          echo "CIDNEFRO_USER=${{ secrets.CIDNEFRO_USER }}" >> .env
+          echo "CIDNEFRO_PASS=${{ secrets.CIDNEFRO_PASS }}" >> .env
+
+      - name: Rodar sync
+        run: python sync.py
