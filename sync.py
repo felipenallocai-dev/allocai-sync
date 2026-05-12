@@ -8,7 +8,7 @@ import os
 from playwright.async_api import async_playwright
 from supabase import create_client
 
-load_dotenv("C:/allocai/Dados/.env")
+load_dotenv()
 
 SUPABASE_URL  = os.getenv("SUPABASE_URL")
 SUPABASE_KEY  = os.getenv("SUPABASE_KEY")
