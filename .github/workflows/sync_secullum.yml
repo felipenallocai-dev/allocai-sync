@@ -21,6 +21,8 @@ jobs:
         with:
           python-version: '3.11'
       - name: Instalar dependências
-        run: pip install supabase python-dotenv requests websockets openpyxl
+        run: |
+          pip install supabase python-dotenv playwright openpyxl
+          playwright install chromium --with-deps
       - name: Rodar sync Secullum
         run: python sync_secullum.py
