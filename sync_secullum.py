@@ -78,30 +78,25 @@ async def download_excel(download_dir: str) -> str | None:
         await page.goto("https://pontoweb.secullum.com.br")
         await page.wait_for_timeout(2000)
 
-        # injeta token no localStorage (forma que SPAs geralmente usam)
-        await page.evaluate(f"""
-            () => {{
-                localStorage.setItem('access_token', '{token}');
-                localStorage.setItem('token', '{token}');
-                localStorage.setItem('userToken', '{token}');
-                // tenta todas as chaves comuns
-                const keys = Object.keys(localStorage);
-                console.log('localStorage keys:', keys);
-            }}
-        """)
+        # injeta token no localStorage
+        await page.evaluate("""(t) => {
+            localStorage.setItem('access_token', t);
+            localStorage.setItem('token', t);
+            localStorage.setItem('userToken', t);
+        }""", token)
 
         # adiciona cookie com o token
-        await context.add_cookies([{{
+        await context.add_cookies([{
             "name": "access_token",
             "value": token,
             "domain": "pontoweb.secullum.com.br",
             "path": "/",
-        }}])
+        }])
 
         # navega para cálculos
         await page.goto("https://pontoweb.secullum.com.br/#/calculos")
         await page.wait_for_timeout(5000)
-        print(f"  URL: {{page.url}}")
+        print(f"  URL: {page.url}")
         print("  Login OK.")
 
         # FECHA MODAIS via JavaScript — remove do DOM sem clicar
