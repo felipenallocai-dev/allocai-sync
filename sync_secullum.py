@@ -134,12 +134,20 @@ async def download_excel(download_dir: str) -> str | None:
 
         await page.wait_for_timeout(1000)
 
-        # aguarda botão Imprimir estar habilitado
-        await page.wait_for_selector("#btnImprimir:not([disabled])", timeout=15_000)
-        await page.wait_for_timeout(500)
+        # fecha qualquer modal React aberto (overlay de seleção de empresa etc)
+        await page.evaluate("""
+            () => {
+                document.querySelectorAll('.ReactModal__Overlay button').forEach(b => b.click());
+                document.querySelectorAll('.ReactModal__Overlay').forEach(el => el.remove());
+                document.querySelectorAll('.ReactModalPortal').forEach(el => el.remove());
+            }
+        """)
+        await page.wait_for_timeout(1000)
 
-        # abre modal de impressão
-        await page.get_by_title("Imprimir").click()
+        # aguarda botão Imprimir estar disponível e clica
+        await page.wait_for_selector("#btnImprimir", timeout=15_000)
+        await page.wait_for_timeout(500)
+        await page.click("#btnImprimir", force=True)
         await page.wait_for_timeout(1500)
 
         # fecha sub-modal "Relatório Cartão Ponto" se aparecer
