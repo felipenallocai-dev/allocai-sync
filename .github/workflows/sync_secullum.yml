@@ -1,0 +1,33 @@
+name: AllocAI Sync Secullum
+
+on:
+  schedule:
+    - cron: '0 6 * * *'   # roda 1x por dia às 06h UTC = 03h Brasília
+  workflow_dispatch:        # permite rodar manualmente
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      SECULLUM_USER: ${{ secrets.SECULLUM_USER }}
+      SECULLUM_PASS: ${{ secrets.SECULLUM_PASS }}
+
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Instalar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependências
+        run: |
+          pip install supabase python-dotenv playwright openpyxl
+          playwright install chromium --with-deps
+
+      - name: Rodar sync Secullum
+        run: python sync_secullum.py
