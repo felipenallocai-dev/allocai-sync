@@ -1,6 +1,7 @@
 import asyncio
 import os
 import re
+import requests
 import tempfile
 from datetime import datetime, timedelta, timezone, time
 
@@ -49,174 +50,144 @@ def is_texto(val, *keywords):
 
 async def download_excel(download_dir: str) -> str | None:
     hoje = datetime.today()
-    inicio = hoje.replace(day=1).strftime("%d/%m/%Y")
-    fim = hoje.strftime("%d/%m/%Y")
-    print(f"  Período: {inicio} → {fim}")
+    inicio_dia = "1"
+    inicio_mes = hoje.strftime("%b")[:3]  # ex: Mai
+    fim_dia = str(hoje.day)
+    fim_mes = hoje.strftime("%b")[:3]
+
+    # Nomes dos meses em português como aparecem no Secullum
+    meses_pt = {
+        "Jan": "Jan", "Feb": "Fev", "Mar": "Mar", "Apr": "Abr",
+        "May": "Mai", "Jun": "Jun", "Jul": "Jul", "Aug": "Ago",
+        "Sep": "Set", "Oct": "Out", "Nov": "Nov", "Dec": "Dez"
+    }
+    mes_atual_pt = meses_pt.get(hoje.strftime("%b"), hoje.strftime("%b"))
+
+    print(f"  Período: 01/{hoje.month:02d} → {hoje.day:02d}/{hoje.month:02d}/{hoje.year}")
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox",
-                  "--disable-dev-shm-usage", "--disable-gpu"]
-        )
+        browser = await p.chromium.launch(headless=False)
         context = await browser.new_context(accept_downloads=True)
         page = await context.new_page()
 
-        # ── PASSO 1: vai direto para o autenticador ──
-        print("  Abrindo autenticador Secullum...")
-        await page.goto(
-            "https://autenticador.secullum.com.br/Authorization"
-            "?response_type=code&client_id=3001"
-            "&redirect_uri=https://pontoweb.secullum.com.br/Auth",
-            wait_until="networkidle"
-        )
-        await page.wait_for_timeout(2000)
-        print(f"  URL: {page.url}")
+        # LOGIN — fluxo exato do codegen
+        print("  Abrindo Secullum...")
+        await page.goto("http://pontoweb.secullum.com.br/")
+        await page.wait_for_timeout(3000)
 
-        # ── PASSO 2: preenche login ──
         print("  Fazendo login...")
-        await page.wait_for_selector('input[name="Email"]', timeout=15000)
-        await page.fill('input[name="Email"]', SECULLUM_USER)
-        await page.fill('input[name="Senha"]', SECULLUM_PASS)
-        await page.click('button[name="action:Login"]')
+        await page.get_by_text("Entrar").click()
+        await page.wait_for_timeout(2000)
 
-        # DEBUG — salva screenshot como artefato
-        await page.wait_for_timeout(5000)
-        print(f"  URL após Entrar: {page.url}")
-        await page.screenshot(path="debug_login.png", full_page=True)
-        print("  Screenshot salvo: debug_login.png")
-
-        # Verifica se tem botão de autorização pendente
+        # preenche email se necessário
         try:
-            auth_btn = await page.query_selector('button:has-text("Autorizar"), button:has-text("Permitir"), button:has-text("Continuar"), button:has-text("Allow")')
-            if auth_btn:
-                print("  Botão de autorização encontrado! Clicando...")
-                await auth_btn.click()
-                await page.wait_for_timeout(3000)
-                print(f"  URL após autorizar: {page.url}")
-        except Exception as e:
-            print(f"  Sem botão de autorização: {e}")
-
-        # ── PASSO 3: aguarda redirecionamento de volta para pontoweb ──
-        print("  Aguardando redirecionamento...")
-        await page.wait_for_url("**/pontoweb.secullum.com.br/**", timeout=30000)
-        await page.wait_for_timeout(4000)
-        print(f"  URL autenticada: {page.url}")
-
-        # ── PASSO 4: fecha modal de aviso se houver ──
-        try:
-            fechar = await page.wait_for_selector('button:has-text("Fechar")', timeout=5000)
-            if fechar:
-                await fechar.click()
-                print("  Modal de aviso fechado")
-                await page.wait_for_timeout(1000)
+            email_field = page.get_by_role("textbox", name="Email")
+            await email_field.fill(SECULLUM_USER, timeout=5000)
         except:
             pass
 
-        # ── PASSO 5: navega para cálculos ──
-        print("  Navegando para Cálculos...")
-        await page.goto("https://pontoweb.secullum.com.br/#/calculos", wait_until="networkidle")
+        await page.get_by_role("textbox", name="Senha").click()
+        await page.get_by_role("textbox", name="Senha").fill(SECULLUM_PASS)
+        await page.get_by_role("button", name="Entrar").click()
         await page.wait_for_timeout(4000)
+        print(f"  URL após login: {page.url}")
 
-        # fecha modais se houver
-        await page.keyboard.press("Escape")
-        await page.wait_for_timeout(500)
-        await page.evaluate("""
-            () => {
-                document.querySelectorAll('.ReactModal__Overlay').forEach(el => el.remove());
-                document.querySelectorAll('.ReactModalPortal').forEach(el => el.remove());
-                document.querySelectorAll('.modal-backdrop').forEach(el => el.remove());
-            }
-        """)
+        # Fecha modal de aviso UTN
+        try:
+            await page.get_by_role("button", name="Fechar").click(timeout=5000)
+            print("  Modal fechado")
+            await page.wait_for_timeout(1000)
+        except:
+            pass
+
+        # Navega para Cálculos
+        print("  Navegando para Cálculos...")
+        await page.get_by_role("link", name=" Relatórios ").click()
         await page.wait_for_timeout(1000)
+        await page.get_by_role("link", name="Cálculos").click()
+        await page.wait_for_timeout(3000)
 
-        # ── PASSO 5: abre modal de impressão ──
+        # Fecha modal "Sim" se aparecer
+        try:
+            await page.get_by_role("button", name="Sim").click(timeout=3000)
+            await page.wait_for_timeout(1000)
+        except:
+            pass
+
+        # Configura período: dia 1 do mês atual até hoje
+        print("  Configurando período...")
+        data_inicio = hoje.replace(day=1).strftime("%d/%m/%Y")
+        data_fim = hoje.strftime("%d/%m/%Y")
+        try:
+            await page.get_by_role("textbox", name="Período").click()
+            await page.get_by_role("textbox", name="Período").fill(data_inicio)
+            await page.wait_for_timeout(500)
+            await page.locator("#dataFim").click()
+            await page.locator("#dataFim").fill(data_fim)
+            await page.wait_for_timeout(500)
+            await page.get_by_role("button", name="OK").click()
+            await page.wait_for_timeout(1000)
+            print(f"  Período configurado: {data_inicio} → {data_fim}")
+        except Exception as e:
+            print(f"  Aviso configuração período: {e}")
+
+        # Abre modal de impressão
         print("  Abrindo modal de impressão...")
-        await page.wait_for_selector("#btnImprimir", timeout=30000)
-        await page.wait_for_timeout(500)
-        await page.evaluate("document.querySelector('#btnImprimir').click()")
+        await page.get_by_title("Imprimir").click()
         await page.wait_for_timeout(2000)
 
-        # ── PASSO 6: configura o modal ──
-        # Imprimir todos os funcionários
-        await page.locator("label").filter(has_text="Imprimir todos funcionários").click()
+        # Configura modal
+        await page.get_by_text("Imprimir todos funcionários").click()
         await page.wait_for_timeout(500)
 
-        # Lista de campos → Lista Padrão
-        await page.locator("#CampoListaCampos .Select-arrow-zone").click()
+        await page.locator("#CampoListaCampos > div > .divSelectDireita > .Select > .Select-control > .Select-arrow-zone").click()
         await page.wait_for_timeout(500)
         await page.get_by_role("option", name="Lista Padrão").click()
         await page.wait_for_timeout(500)
 
-        # Formato → Excel Layout Simplificado (value=6)
         await page.locator("#formatoImpressao").select_option("6")
         await page.wait_for_timeout(500)
 
-        # ── PASSO 7: gera o relatório ──
-        print("  Gerando relatório Excel...")
         dest = os.path.join(download_dir, "secullum.xlsx")
 
-        # clica Imprimir para iniciar geração
-        await page.evaluate("""
-            () => {
-                const btns = document.querySelectorAll('button');
-                for (const btn of btns) {
-                    if (btn.textContent.trim() === 'Imprimir' && btn.id !== 'btnImprimir') {
-                        btn.click();
-                        break;
-                    }
-                }
-            }
-        """)
-        print("  Aguardando geração (até 3 min)...")
-        await page.wait_for_selector("text=Relatório gerado com êxito", timeout=180000)
-        print("  Relatório gerado! Capturando download...")
+        # Clica Imprimir
+        print("  Gerando relatório (aguarde até 5 min)...")
+        await page.get_by_role("button", name="Imprimir").click()
 
-        # captura download — o "Abrir" abre popup com o arquivo
-        # escuta no contexto inteiro para pegar o download de qualquer página/popup
+        # aguarda relatório terminar
+        await page.wait_for_selector("text=Relatório gerado com êxito", timeout=300000)
+        print("  Relatório gerado! Capturando arquivo...")
+
+        # captura o download — abre nova aba que dispara o download
         async with context.expect_page() as popup_info:
-            async with context.expect_event("download") as dl_info:
-                await page.evaluate("""
-                    () => {
-                        const btns = document.querySelectorAll('button');
-                        for (const btn of btns) {
-                            if (btn.textContent.trim() === 'Abrir') {
-                                btn.click();
-                                break;
-                            }
-                        }
-                    }
-                """)
-                try:
-                    download = await asyncio.wait_for(
-                        asyncio.shield(asyncio.ensure_future(dl_info.value)),
-                        timeout=30
-                    )
-                    await download.save_as(dest)
-                    print(f"  ✓ Download via evento: {dest}")
-                except Exception:
-                    # download veio como popup — pega URL e baixa via requests
-                    try:
-                        popup = await asyncio.wait_for(
-                            asyncio.shield(asyncio.ensure_future(popup_info.value)),
-                            timeout=10
-                        )
-                        await popup.wait_for_load_state("domcontentloaded", timeout=15000)
-                        file_url = popup.url
-                        print(f"  URL do arquivo: {file_url}")
-                        cookies = await context.cookies()
-                        import requests as _req
-                        cookie_dict = {c["name"]: c["value"] for c in cookies}
-                        resp = _req.get(file_url, cookies=cookie_dict, timeout=60)
-                        resp.raise_for_status()
-                        with open(dest, "wb") as f:
-                            f.write(resp.content)
-                        print(f"  ✓ Download via popup URL: {dest}")
-                        await popup.close()
-                    except Exception as e2:
-                        raise RuntimeError(f"Não foi possível capturar o arquivo: {e2}")
+            await page.get_by_role("button", name="Abrir").click()
 
-        print(f"  ✓ Download: {dest}")
+        popup = await popup_info.value
+        print(f"  Popup URL: {popup.url}")
+
+        # aguarda o download dentro do popup
+        try:
+            async with popup.expect_download(timeout=30000) as dl_info:
+                pass  # o download já foi disparado ao abrir a página
+            download = await dl_info.value
+            await download.save_as(dest)
+            print(f"  ✓ Download via popup: {dest}")
+        except Exception as e:
+            print(f"  Popup sem download direto: {e}")
+            # tenta via URL do popup com cookies
+            await popup.wait_for_load_state("networkidle", timeout=15000)
+            file_url = popup.url
+            if file_url and file_url != "about:blank":
+                cookies = await context.cookies()
+                cookie_dict = {c["name"]: c["value"] for c in cookies}
+                resp = requests.get(file_url, cookies=cookie_dict, timeout=120)
+                resp.raise_for_status()
+                with open(dest, "wb") as f:
+                    f.write(resp.content)
+                print(f"  ✓ Download via URL: {dest}")
+            else:
+                raise RuntimeError("Não foi possível capturar o arquivo")
+
         await browser.close()
         return dest
 
@@ -232,100 +203,103 @@ def parse_excel(path):
     i = 0
     while i < len(rows):
         row = rows[i]
-        nome = matricula = funcao = departamento = None
+        nome = None
         for cell in row:
-            if isinstance(cell, str) and cell.strip().startswith("Nome"):
+            if isinstance(cell, str) and "Nome" in cell and cell.strip() != "Nome":
                 partes = cell.split(":", 1)
                 if len(partes) == 2 and partes[1].strip():
                     nome = partes[1].strip()
-        j = i + 1
-        while j < len(rows) and j < i + 10:
-            r2 = rows[j]
-            line_text = " ".join(str(c) for c in r2 if c is not None)
-            if "Nome" in line_text and nome is None:
-                for idx, cell in enumerate(r2):
-                    if isinstance(cell, str) and "Nome" in cell:
-                        partes = cell.split(":", 1)
-                        nome = partes[1].strip() if len(partes) == 2 else (str(r2[idx+1]).strip() if idx+1 < len(r2) and r2[idx+1] else None)
-                        break
-            if "Identificador" in line_text or "Matrícula" in line_text:
-                for idx, cell in enumerate(r2):
-                    if isinstance(cell, str) and ("Identificador" in cell or "Matrícula" in cell):
-                        partes = cell.split(":", 1)
-                        matricula = partes[1].strip() if len(partes) == 2 else (str(r2[idx+1]).strip() if idx+1 < len(r2) and r2[idx+1] else None)
-                        break
-            if "Fun" in line_text:
-                for idx, cell in enumerate(r2):
-                    if isinstance(cell, str) and "Fun" in cell:
-                        partes = cell.split(":", 1)
-                        funcao = partes[1].strip() if len(partes) == 2 else (str(r2[idx+1]).strip() if idx+1 < len(r2) and r2[idx+1] else None)
-                        break
-            if "Departamento" in line_text:
-                for idx, cell in enumerate(r2):
-                    if isinstance(cell, str) and "Departamento" in cell:
-                        partes = cell.split(":", 1)
-                        departamento = partes[1].strip() if len(partes) == 2 else (str(r2[idx+1]).strip() if idx+1 < len(r2) and r2[idx+1] else None)
-                        break
-            if r2[0] and isinstance(r2[0], str) and DATE_RE.match(str(r2[0]).strip()):
+                    break
+            elif isinstance(cell, str) and cell.strip() == "Nome":
+                idx_cell = list(row).index(cell)
+                if idx_cell + 1 < len(row) and row[idx_cell + 1]:
+                    nome = str(row[idx_cell + 1]).strip()
+                    break
+        if not nome:
+            i += 1
+            continue
+        departamento = None
+        data_start = None
+        for k in range(i+1, min(i+15, len(rows))):
+            r = rows[k]
+            for idx_c, cell in enumerate(r):
+                if isinstance(cell, str) and "Departamento" in cell:
+                    partes = cell.split(":", 1)
+                    if len(partes) == 2 and partes[1].strip():
+                        departamento = partes[1].strip()
+                    elif idx_c + 1 < len(r) and r[idx_c + 1]:
+                        departamento = str(r[idx_c + 1]).strip()
+                    break
+            if r[0] and isinstance(r[0], str) and DATE_RE.match(str(r[0]).strip()):
+                data_start = k
                 break
-            j += 1
-        if nome and departamento and departamento in DEPARTAMENTOS_ALVO:
-            print(f"    Técnico: {nome} | {departamento}")
-            k = j
-            while k < len(rows):
-                dr = rows[k]
-                col0 = str(dr[0]).strip() if dr[0] else ""
-                if not DATE_RE.match(col0): break
-                try:
-                    data_date = datetime.strptime(col0[:10], "%d/%m/%Y").date()
-                except ValueError:
-                    k += 1; continue
-                ent1  = dr[1]  if len(dr) > 1  else None
-                sai1  = dr[2]  if len(dr) > 2  else None
-                sai2  = dr[4]  if len(dr) > 4  else None
-                sai3  = dr[6]  if len(dr) > 6  else None
-                ex50  = dr[8]  if len(dr) > 8  else None
-                ex100 = dr[9]  if len(dr) > 9  else None
-                exnot = dr[10] if len(dr) > 10 else None
-                if is_texto(ent1, "FOLGA"):                   status = "folga"
-                elif is_texto(ent1, "FALTA"):                 status = "falta"
-                elif is_texto(ent1, "FÉRIAS", "FERIAS"):      status = "ferias"
-                elif is_texto(ent1, "INSS", "AFASTADO"):      status = "afastado"
-                elif isinstance(ent1, timedelta):             status = "presente"
-                else:                                         status = "ausente"
-                entrada_t = timedelta_to_time(ent1) if status == "presente" else None
-                saida_t = next((timedelta_to_time(s) for s in (sai3, sai2, sai1) if timedelta_to_time(s)), None)
-                horas_min = None
-                if status == "presente" and entrada_t and saida_t:
-                    horas_min = max(0, (saida_t.hour*60+saida_t.minute) - (entrada_t.hour*60+entrada_t.minute) - 60)
-                extra_min = timedelta_to_minutes(ex50) + timedelta_to_minutes(ex100) + timedelta_to_minutes(exnot)
-                shift = "noite" if (entrada_t and entrada_t.hour >= 18) else ("noite" if "Noite" in (departamento or "") else "dia")
-                registros.append({
-                    "nome": nome, "matricula": matricula, "funcao": funcao,
-                    "departamento": departamento, "date": data_date.isoformat(),
-                    "status": status,
-                    "entrada": entrada_t.strftime("%H:%M") if entrada_t else None,
-                    "saida": saida_t.strftime("%H:%M") if saida_t else None,
-                    "horas_trabalhadas_min": horas_min,
-                    "extra_min": extra_min if extra_min > 0 else None,
-                    "shift": shift,
-                })
-                k += 1
-            i = k
-        else:
-            i = j + 1
+        if not departamento or not data_start:
+            i += 1
+            continue
+        departamento = departamento.strip()
+        if departamento not in DEPARTAMENTOS_ALVO:
+            i = data_start + 1
+            while i < len(rows):
+                if rows[i][0] and isinstance(rows[i][0], str) and DATE_RE.match(str(rows[i][0]).strip()):
+                    i += 1
+                else:
+                    break
+            continue
+        print(f"    Técnico: {nome} | {departamento}")
+        k = data_start
+        while k < len(rows):
+            dr = rows[k]
+            col0 = str(dr[0]).strip() if dr[0] else ""
+            if not DATE_RE.match(col0): break
+            try:
+                data_date = datetime.strptime(col0[:10], "%d/%m/%Y").date()
+            except ValueError:
+                k += 1; continue
+            ent1  = dr[1]  if len(dr) > 1  else None
+            sai1  = dr[2]  if len(dr) > 2  else None
+            sai2  = dr[4]  if len(dr) > 4  else None
+            sai3  = dr[6]  if len(dr) > 6  else None
+            ex50  = dr[8]  if len(dr) > 8  else None
+            ex100 = dr[9]  if len(dr) > 9  else None
+            exnot = dr[10] if len(dr) > 10 else None
+            if is_texto(ent1, "FOLGA"):               status = "folga"
+            elif is_texto(ent1, "FALTA"):             status = "falta"
+            elif is_texto(ent1, "FÉRIAS", "FERIAS"):  status = "ferias"
+            elif is_texto(ent1, "INSS", "AFASTADO"):  status = "afastado"
+            elif isinstance(ent1, timedelta):         status = "presente"
+            else:                                     status = "ausente"
+            entrada_t = timedelta_to_time(ent1) if status == "presente" else None
+            saida_t = next((timedelta_to_time(s) for s in (sai3, sai2, sai1) if timedelta_to_time(s)), None)
+            horas_min = None
+            if status == "presente" and entrada_t and saida_t:
+                horas_min = max(0, (saida_t.hour*60+saida_t.minute) - (entrada_t.hour*60+entrada_t.minute) - 60)
+            extra_min = timedelta_to_minutes(ex50) + timedelta_to_minutes(ex100) + timedelta_to_minutes(exnot)
+            shift = "noite" if (entrada_t and entrada_t.hour >= 18) else ("noite" if "Noite" in departamento else "dia")
+            registros.append({
+                "nome": nome, "matricula": None, "funcao": None,
+                "departamento": departamento, "date": data_date.isoformat(),
+                "status": status,
+                "entrada": entrada_t.strftime("%H:%M") if entrada_t else None,
+                "saida": saida_t.strftime("%H:%M") if saida_t else None,
+                "horas_trabalhadas_min": horas_min,
+                "extra_min": extra_min if extra_min > 0 else None,
+                "shift": shift,
+            })
+            k += 1
+        i = k
     print(f"  {len(registros)} registros parseados.")
     return registros
-
 _technician_cache = {}
 
 def upsert_technician(nome, company_id):
     if nome in _technician_cache: return _technician_cache[nome]
-    res = supabase.table("technicians").upsert(
-        {"company_id": company_id, "name": nome},
-        on_conflict="company_id,name"
-    ).select("id").execute()
-    tech_id = res.data[0]["id"]
+    # busca primeiro, cria se não existir
+    res = supabase.table("technicians").select("id").eq("company_id", company_id).eq("name", nome).execute()
+    if res.data:
+        tech_id = res.data[0]["id"]
+    else:
+        res2 = supabase.table("technicians").insert({"company_id": company_id, "name": nome}).execute()
+        tech_id = res2.data[0]["id"]
     _technician_cache[nome] = tech_id
     return tech_id
 
@@ -398,7 +372,9 @@ async def main():
     print(f"{'='*50}")
     stats = {"inserted": 0, "updated": 0, "errors": 0}
     fetched = 0
-    with tempfile.TemporaryDirectory() as tmpdir:
+    tmpdir = r"C:\allocai\allocai-sync\downloads"
+    os.makedirs(tmpdir, exist_ok=True)
+    if True:
         try:
             print("\n[1/3] Baixando cartão ponto...")
             xlsx_path = await download_excel(tmpdir)
