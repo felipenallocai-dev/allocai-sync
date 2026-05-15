@@ -68,13 +68,37 @@ def get_token():
     return token
 
 def get_banco_id(token):
-    """Descobre o ID do banco via header da resposta."""
-    resp = requests.get(
-        "https://pontoweb.secullum.com.br/Funcionarios",
-        headers={"Authorization": f"Bearer {token}"},
-        timeout=30,
-    )
+    """Descobre o ID do banco — tenta várias rotas."""
+    headers = {"Authorization": f"Bearer {token}"}
+    
+    # tenta /Funcionarios
+    resp = requests.get("https://pontoweb.secullum.com.br/Funcionarios", headers=headers, timeout=30)
     banco_id = resp.headers.get("Secullumbancoselecioando", "")
+    
+    if not banco_id:
+        # tenta /Calculos
+        resp2 = requests.get("https://pontoweb.secullum.com.br/Calculos", headers=headers, timeout=30)
+        banco_id = resp2.headers.get("Secullumbancoselecioando", "")
+    
+    if not banco_id:
+        # tenta /Configuracoes e pega o id do primeiro item
+        resp3 = requests.get("https://pontoweb.secullum.com.br/Configuracoes", headers=headers, timeout=30)
+        print(f"  Configuracoes response: {resp3.text[:300]}")
+        try:
+            data = resp3.json()
+            if isinstance(data, list) and data:
+                banco_id = str(data[0].get("Id") or data[0].get("id") or data[0].get("BancoDados") or "")
+            elif isinstance(data, dict):
+                banco_id = str(data.get("Id") or data.get("id") or data.get("BancoDados") or "")
+        except:
+            pass
+
+    if not banco_id:
+        # tenta /2 (endpoint que apareceu no network)
+        resp4 = requests.get("https://pontoweb.secullum.com.br/2", headers=headers, timeout=30)
+        banco_id = resp4.headers.get("Secullumbancoselecioando", "")
+        print(f"  /2 response: {resp4.text[:200]}")
+
     print(f"  Banco ID: {banco_id}")
     return banco_id
 
@@ -183,14 +207,27 @@ async def download_excel(download_dir):
         ws_url,
         additional_headers={
             "Origin": "https://pontoweb.secullum.com.br",
+            "Authorization": f"Bearer {token}",
+            "Secullumbancoselecioando": banco_id,
         },
         ping_interval=20,
     ) as ws:
         print("  WebSocket conectado!")
 
-        # envia inicialização SignalR
-        await ws.send(json.dumps({"protocol": "json", "version": 1}))
+        # autentica via mensagem (formato que o Secullum espera)
+        auth_msg = json.dumps({
+            "hubName": "--AUTH--",
+            "arguments": [token, banco_id]
+        })
+        await ws.send(auth_msg)
         await asyncio.sleep(1)
+
+        # lê resposta da autenticação
+        try:
+            auth_resp = await asyncio.wait_for(ws.recv(), timeout=5)
+            print(f"  Auth resp: {auth_resp[:200]}")
+        except asyncio.TimeoutError:
+            pass
 
         # envia solicitação do relatório
         await ws.send(json.dumps(payload))
