@@ -82,24 +82,26 @@ async def download_excel(download_dir: str) -> str | None:
         """)
         await page.wait_for_timeout(1000)
 
-        # NAVEGA PARA CÁLCULOS
-        await page.goto("https://pontoweb.secullum.com.br/#/calculos")
+        # NAVEGA PARA CÁLCULOS via menu (igual ao codegen)
+        await page.get_by_role("link", name=" Relatórios ").click()
+        await page.get_by_role("link", name="Cálculos").click()
         await page.wait_for_timeout(3000)
 
-        # FECHA MODAIS novamente após navegar
+        # FECHA MODAIS via ESC e JS
+        await page.keyboard.press("Escape")
+        await page.wait_for_timeout(500)
         await page.evaluate("""
             () => {
                 document.querySelectorAll('.ReactModal__Overlay').forEach(el => el.remove());
                 document.querySelectorAll('.ReactModalPortal').forEach(el => el.remove());
             }
         """)
-        await page.keyboard.press("Escape")
         await page.wait_for_timeout(1000)
 
-        # CLICA EM IMPRIMIR — aguarda o botão e força via JavaScript
+        # CLICA EM IMPRIMIR — aguarda até 30s
         print("  Abrindo modal de impressão...")
-        await page.wait_for_selector("#btnImprimir", timeout=15000)
-        await page.wait_for_timeout(1000)
+        await page.wait_for_selector("#btnImprimir", timeout=30000)
+        await page.wait_for_timeout(500)
         await page.evaluate("document.querySelector('#btnImprimir').click()")
         await page.wait_for_timeout(2000)
 
