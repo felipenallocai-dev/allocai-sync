@@ -61,18 +61,51 @@ async def download_excel(download_dir: str) -> str | None:
         context = await browser.new_context(accept_downloads=True)
         page = await context.new_page()
 
-        # LOGIN
-        print("  Login...")
-        await page.goto("https://autenticador.secullum.com.br/Authorization?response_type=code&client_id=3001&redirect_uri=https://pontoweb.secullum.com.br/Auth")
-        await page.wait_for_selector("#Email", timeout=15000)
-        await page.fill("#Email", SECULLUM_USER)
-        await page.fill("input[type='password']", SECULLUM_PASS)
-        await page.click("button:has-text('Entrar')")
-        await page.wait_for_url("**/pontoweb.secullum.com.br/**", timeout=15000)
+        # LOGIN VIA API — injeta token no browser
+        import requests as _requests
+        print("  Login via API...")
+        resp = _requests.post(
+            "https://autenticador.secullum.com.br/Token",
+            data={"grant_type": "password", "username": SECULLUM_USER, "password": SECULLUM_PASS, "client_id": "3001"},
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        token = resp.json()["access_token"]
+        print("  Token obtido. Abrindo browser autenticado...")
+
+        # abre a página e injeta o token via localStorage/cookie
+        await page.goto("https://pontoweb.secullum.com.br")
+        await page.wait_for_timeout(2000)
+
+        # injeta token no localStorage (forma que SPAs geralmente usam)
+        await page.evaluate(f"""
+            () => {{
+                localStorage.setItem('access_token', '{token}');
+                localStorage.setItem('token', '{token}');
+                localStorage.setItem('userToken', '{token}');
+                // tenta todas as chaves comuns
+                const keys = Object.keys(localStorage);
+                console.log('localStorage keys:', keys);
+            }}
+        """)
+
+        # adiciona cookie com o token
+        await context.add_cookies([{{
+            "name": "access_token",
+            "value": token,
+            "domain": "pontoweb.secullum.com.br",
+            "path": "/",
+        }}])
+
+        # navega para cálculos
+        await page.goto("https://pontoweb.secullum.com.br/#/calculos")
+        await page.wait_for_timeout(5000)
+        print(f"  URL: {{page.url}}")
         print("  Login OK.")
 
         # FECHA MODAIS via JavaScript — remove do DOM sem clicar
-        await page.wait_for_timeout(3000)
+        await page.wait_for_timeout(2000)
         await page.evaluate("""
             () => {
                 document.querySelectorAll('.ReactModal__Overlay').forEach(el => el.remove());
