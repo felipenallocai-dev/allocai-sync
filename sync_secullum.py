@@ -96,8 +96,10 @@ async def download_excel(download_dir: str) -> str | None:
         await page.keyboard.press("Escape")
         await page.wait_for_timeout(1000)
 
-        # CLICA EM IMPRIMIR — força via JavaScript para ignorar overlays
+        # CLICA EM IMPRIMIR — aguarda o botão e força via JavaScript
         print("  Abrindo modal de impressão...")
+        await page.wait_for_selector("#btnImprimir", timeout=15000)
+        await page.wait_for_timeout(1000)
         await page.evaluate("document.querySelector('#btnImprimir').click()")
         await page.wait_for_timeout(2000)
 
