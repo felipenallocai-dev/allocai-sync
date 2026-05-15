@@ -2,11 +2,10 @@ import asyncio
 import os
 import re
 import tempfile
-import json
-import requests
 from datetime import datetime, timedelta, timezone, time
 
 from dotenv import load_dotenv
+from playwright.async_api import async_playwright
 from supabase import create_client
 
 load_dotenv()
@@ -47,235 +46,115 @@ def is_texto(val, *keywords):
     if not isinstance(val, str): return False
     return val.strip().upper() in [k.upper() for k in keywords]
 
-# ─── autenticação ─────────────────────────────────────────────────────────────
 
-def get_token():
-    print("  Fazendo login...")
-    resp = requests.post(
-        "https://autenticador.secullum.com.br/Token",
-        data={
-            "grant_type": "password",
-            "username": SECULLUM_USER,
-            "password": SECULLUM_PASS,
-            "client_id": "3001",
-        },
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    token = resp.json()["access_token"]
-    print("  Token obtido.")
-    return token
-
-def get_banco_id(token):
-    """Descobre o ID do banco — tenta várias rotas."""
-    headers = {"Authorization": f"Bearer {token}"}
-    
-    # tenta /Funcionarios
-    resp = requests.get("https://pontoweb.secullum.com.br/Funcionarios", headers=headers, timeout=30)
-    banco_id = resp.headers.get("Secullumbancoselecioando", "")
-    
-    if not banco_id:
-        # tenta /Calculos
-        resp2 = requests.get("https://pontoweb.secullum.com.br/Calculos", headers=headers, timeout=30)
-        banco_id = resp2.headers.get("Secullumbancoselecioando", "")
-    
-    if not banco_id:
-        # tenta /Configuracoes e pega o id do primeiro item
-        resp3 = requests.get("https://pontoweb.secullum.com.br/Configuracoes", headers=headers, timeout=30)
-        print(f"  Configuracoes response: {resp3.text[:300]}")
-        try:
-            data = resp3.json()
-            if isinstance(data, list) and data:
-                banco_id = str(data[0].get("Id") or data[0].get("id") or data[0].get("BancoDados") or "")
-            elif isinstance(data, dict):
-                banco_id = str(data.get("Id") or data.get("id") or data.get("BancoDados") or "")
-        except:
-            pass
-
-    if not banco_id:
-        # tenta /2 (endpoint que apareceu no network)
-        resp4 = requests.get("https://pontoweb.secullum.com.br/2", headers=headers, timeout=30)
-        banco_id = resp4.headers.get("Secullumbancoselecioando", "")
-        print(f"  /2 response: {resp4.text[:200]}")
-
-    print(f"  Banco ID: {banco_id}")
-    return banco_id
-
-# ─── SignalR negotiate ────────────────────────────────────────────────────────
-
-def negotiate_signalr(token, banco_id):
-    """Faz o negotiate do SignalR para obter connection token."""
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Secullumbancoselecioando": banco_id,
-        "Origin": "https://pontoweb.secullum.com.br",
-        "Referer": "https://pontoweb.secullum.com.br/",
-    }
-    resp = requests.post(
-        "https://pontowebrelatorios.secullum.com.br/signalr/negotiate",
-        headers=headers,
-        timeout=30,
-    )
-    if resp.status_code != 200:
-        # tenta GET
-        resp = requests.get(
-            "https://pontowebrelatorios.secullum.com.br/signalr/negotiate",
-            headers=headers,
-            timeout=30,
-        )
-    print(f"  Negotiate status: {resp.status_code}")
-    print(f"  Negotiate response: {resp.text[:200]}")
-    return resp.json() if resp.ok else {}
-
-# ─── download via SignalR ─────────────────────────────────────────────────────
-
-async def download_excel(download_dir):
-    import websockets
-
+async def download_excel(download_dir: str) -> str | None:
     hoje = datetime.today()
     inicio = hoje.replace(day=1).strftime("%d/%m/%Y")
     fim = hoje.strftime("%d/%m/%Y")
     print(f"  Período: {inicio} → {fim}")
 
-    token = get_token()
-    banco_id = get_banco_id(token)
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+        )
+        context = await browser.new_context(accept_downloads=True)
+        page = await context.new_page()
 
-    headers_http = {
-        "Authorization": f"Bearer {token}",
-        "Secullumbancoselecioando": banco_id,
-        "Origin": "https://pontoweb.secullum.com.br",
-        "Referer": "https://pontoweb.secullum.com.br/",
-    }
+        # LOGIN
+        print("  Login...")
+        await page.goto("https://autenticador.secullum.com.br/Authorization?response_type=code&client_id=3001&redirect_uri=https://pontoweb.secullum.com.br/Auth")
+        await page.wait_for_selector("#Email", timeout=15000)
+        await page.fill("#Email", SECULLUM_USER)
+        await page.fill("input[type='password']", SECULLUM_PASS)
+        await page.click("button:has-text('Entrar')")
+        await page.wait_for_url("**/pontoweb.secullum.com.br/**", timeout=15000)
+        print("  Login OK.")
 
-    # busca lista de campos para obter ID da Lista Padrão
-    resp = requests.get(
-        "https://pontoweb.secullum.com.br/ImpressaoCalculo",
-        headers=headers_http,
-        timeout=30,
-    )
-    listas = resp.json()
-    lista_padrao_id = next((l["Id"] for l in listas if "Padrão" in l["NomeLista"] or "Padrao" in l["NomeLista"]), 1)
-    print(f"  Lista Padrão ID: {lista_padrao_id}")
+        # FECHA MODAIS via JavaScript — remove do DOM sem clicar
+        await page.wait_for_timeout(3000)
+        await page.evaluate("""
+            () => {
+                document.querySelectorAll('.ReactModal__Overlay').forEach(el => el.remove());
+                document.querySelectorAll('.ReactModalPortal').forEach(el => el.remove());
+                document.querySelectorAll('.modal-backdrop').forEach(el => el.remove());
+            }
+        """)
+        await page.wait_for_timeout(1000)
 
-    # monta a query string do relatório
-    inicio_api = hoje.replace(day=1).strftime("%Y-%m-%d")
-    fim_api = hoje.strftime("%Y-%m-%d")
+        # NAVEGA PARA CÁLCULOS
+        await page.goto("https://pontoweb.secullum.com.br/#/calculos")
+        await page.wait_for_timeout(3000)
 
-    # monta URL do WebSocket SignalR
-    # o token e banco vão como query params
-    import urllib.parse
-    qs = urllib.parse.urlencode({
-        "token": token,
-        "banco": banco_id,
-    })
-    ws_url = f"wss://pontowebrelatorios.secullum.com.br/signalr/connect?{qs}"
+        # FECHA MODAIS novamente após navegar
+        await page.evaluate("""
+            () => {
+                document.querySelectorAll('.ReactModal__Overlay').forEach(el => el.remove());
+                document.querySelectorAll('.ReactModalPortal').forEach(el => el.remove());
+            }
+        """)
+        await page.keyboard.press("Escape")
+        await page.wait_for_timeout(1000)
 
-    # tenta negotiate primeiro
-    neg = negotiate_signalr(token, banco_id)
-    conn_token = neg.get("ConnectionToken", "")
-    if conn_token:
-        qs2 = urllib.parse.urlencode({
-            "transport": "webSockets",
-            "connectionToken": conn_token,
-            "token": token,
-            "banco": banco_id,
-        })
-        ws_url = f"wss://pontowebrelatorios.secullum.com.br/signalr/connect?{qs2}"
+        # CLICA EM IMPRIMIR — força via JavaScript para ignorar overlays
+        print("  Abrindo modal de impressão...")
+        await page.evaluate("document.querySelector('#btnImprimir').click()")
+        await page.wait_for_timeout(2000)
 
-    print(f"  Conectando WebSocket: {ws_url[:80]}...")
+        # CONFIGURA O MODAL
+        # Imprimir todos os funcionários
+        await page.locator("label").filter(has_text="Imprimir todos funcionários").click()
+        await page.wait_for_timeout(500)
 
-    dest = os.path.join(download_dir, "secullum.xlsx")
+        # Lista de campos → Lista Padrão
+        await page.locator("#CampoListaCampos .Select-arrow-zone").click()
+        await page.wait_for_timeout(500)
+        await page.get_by_role("option", name="Lista Padrão").click()
+        await page.wait_for_timeout(500)
 
-    # payload SignalR para solicitar o relatório
-    payload = {
-        "H": "RelatorioCartaoPontoExcelSimplificado",
-        "M": "GerarRelatorio",
-        "A": [{
-            "DataInicio": inicio_api,
-            "DataFim": fim_api,
-            "ListaImpressaoCalculoId": lista_padrao_id,
-            "TipoRelatorio": 0,
-            "TotaisNoRodape": True,
-            "TodosOsFuncionarios": True,
-            "Formato": 6,
-        }],
-        "I": 0,
-    }
+        # Formato → Excel Layout Simplificado (value=6)
+        await page.locator("#formatoImpressao").select_option("6")
+        await page.wait_for_timeout(500)
 
-    async with websockets.connect(
-        ws_url,
-        additional_headers={
-            "Origin": "https://pontoweb.secullum.com.br",
-            "Authorization": f"Bearer {token}",
-            "Secullumbancoselecioando": banco_id,
-        },
-        ping_interval=20,
-    ) as ws:
-        print("  WebSocket conectado!")
+        # GERA O RELATÓRIO — captura download ANTES de clicar
+        print("  Gerando relatório...")
+        dest = os.path.join(download_dir, "secullum.xlsx")
 
-        # autentica via mensagem (formato que o Secullum espera)
-        auth_msg = json.dumps({
-            "hubName": "--AUTH--",
-            "arguments": [token, banco_id]
-        })
-        await ws.send(auth_msg)
-        await asyncio.sleep(1)
+        async with page.expect_download(timeout=180000) as dl_info:
+            # clica Imprimir via JS para evitar bloqueios
+            await page.evaluate("""
+                () => {
+                    const btns = document.querySelectorAll('button');
+                    for (const btn of btns) {
+                        if (btn.textContent.trim() === 'Imprimir' && btn.id !== 'btnImprimir') {
+                            btn.click();
+                            break;
+                        }
+                    }
+                }
+            """)
+            print("  Aguardando geração (até 3 min)...")
+            # aguarda o botão Abrir aparecer e clica
+            await page.wait_for_selector("text=Relatório gerado com êxito", timeout=180000)
+            print("  Relatório gerado! Clicando Abrir...")
+            await page.evaluate("""
+                () => {
+                    const btns = document.querySelectorAll('button');
+                    for (const btn of btns) {
+                        if (btn.textContent.trim() === 'Abrir') {
+                            btn.click();
+                            break;
+                        }
+                    }
+                }
+            """)
 
-        # lê resposta da autenticação
-        try:
-            auth_resp = await asyncio.wait_for(ws.recv(), timeout=5)
-            print(f"  Auth resp: {auth_resp[:200]}")
-        except asyncio.TimeoutError:
-            pass
+        download = await dl_info.value
+        await download.save_as(dest)
+        print(f"  ✓ Download: {dest}")
+        await browser.close()
+        return dest
 
-        # envia solicitação do relatório
-        await ws.send(json.dumps(payload))
-        print("  Solicitação enviada. Aguardando resposta...")
-
-        # aguarda resposta por até 3 minutos
-        deadline = asyncio.get_event_loop().time() + 180
-        while asyncio.get_event_loop().time() < deadline:
-            try:
-                msg = await asyncio.wait_for(ws.recv(), timeout=10)
-                print(f"  WS recv: {str(msg)[:200]}")
-
-                # arquivo binário
-                if isinstance(msg, bytes) and len(msg) > 1000:
-                    with open(dest, "wb") as f:
-                        f.write(msg)
-                    print(f"  Arquivo binário salvo: {dest}")
-                    return dest
-
-                # JSON com URL ou base64
-                try:
-                    data = json.loads(msg)
-                    url = data.get("url") or data.get("R", {}).get("url") if isinstance(data.get("R"), dict) else None
-                    if url:
-                        r = requests.get(url, headers=headers_http, timeout=60)
-                        with open(dest, "wb") as f:
-                            f.write(r.content)
-                        print(f"  Arquivo baixado via URL: {dest}")
-                        return dest
-
-                    b64 = data.get("b64") or data.get("R", {}).get("b64") if isinstance(data.get("R"), dict) else None
-                    if b64:
-                        import base64
-                        with open(dest, "wb") as f:
-                            f.write(base64.b64decode(b64))
-                        print(f"  Arquivo salvo via base64: {dest}")
-                        return dest
-
-                except json.JSONDecodeError:
-                    pass
-
-            except asyncio.TimeoutError:
-                continue
-
-    raise RuntimeError("WebSocket não entregou o arquivo em 3 minutos.")
-
-
-# ─── parse do Excel ──────────────────────────────────────────────────────────
 
 DATE_RE = re.compile(r"^\d{2}/\d{2}/\d{4}")
 
