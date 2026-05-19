@@ -1,20 +1,16 @@
 name: AllocAI Sync Secullum
-
 on:
   schedule:
     - cron: '0 6 * * *'
   workflow_dispatch:
-
 jobs:
   sync:
     runs-on: ubuntu-latest
-
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
       SECULLUM_USER: ${{ secrets.SECULLUM_USER }}
       SECULLUM_PASS: ${{ secrets.SECULLUM_PASS }}
-
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -26,3 +22,10 @@ jobs:
           playwright install chromium --with-deps
       - name: Rodar sync Secullum
         run: python sync_secullum.py
+      - name: Salvar screenshot de debug
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshot
+          path: debug_login.png
+          if-no-files-found: ignore
