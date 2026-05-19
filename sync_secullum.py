@@ -78,7 +78,7 @@ async def download_excel(download_dir: str) -> str | None:
         await page.wait_for_selector('input[name="Email"]', timeout=15000)
         await page.fill('input[name="Email"]', SECULLUM_USER)
         await page.fill('input[name="Senha"]', SECULLUM_PASS)
-        await page.click('button[type="submit"]')
+        await page.click('button[name="action:Login"]')
 
         # DEBUG — salva screenshot como artefato
         await page.wait_for_timeout(5000)
