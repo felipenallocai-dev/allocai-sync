@@ -80,14 +80,22 @@ async def download_excel(download_dir: str) -> str | None:
         await page.fill('input[type="password"]', SECULLUM_PASS)
         await page.click('button[type="submit"], input[type="submit"], button:has-text("Entrar")')
 
-        # DEBUG
+        # DEBUG — salva screenshot como artefato
         await page.wait_for_timeout(5000)
         print(f"  URL após Entrar: {page.url}")
-        await page.screenshot(path="/tmp/debug_login.png")
-        import base64
-        with open("/tmp/debug_login.png", "rb") as f:
-            b64 = base64.b64encode(f.read()).decode()
-        print(f"  SCREENSHOT_B64:{b64[:300]}...")
+        await page.screenshot(path="debug_login.png", full_page=True)
+        print("  Screenshot salvo: debug_login.png")
+
+        # Verifica se tem botão de autorização pendente
+        try:
+            auth_btn = await page.query_selector('button:has-text("Autorizar"), button:has-text("Permitir"), button:has-text("Continuar"), button:has-text("Allow")')
+            if auth_btn:
+                print("  Botão de autorização encontrado! Clicando...")
+                await auth_btn.click()
+                await page.wait_for_timeout(3000)
+                print(f"  URL após autorizar: {page.url}")
+        except Exception as e:
+            print(f"  Sem botão de autorização: {e}")
 
         # ── PASSO 3: aguarda redirecionamento de volta para pontoweb ──
         print("  Aguardando redirecionamento...")
