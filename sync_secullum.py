@@ -152,39 +152,70 @@ async def download_excel(download_dir: str) -> str | None:
         await page.locator("#formatoImpressao").select_option("6")
         await page.wait_for_timeout(500)
 
-        # ── PASSO 7: gera e baixa o relatório ──
+        # ── PASSO 7: gera o relatório ──
         print("  Gerando relatório Excel...")
         dest = os.path.join(download_dir, "secullum.xlsx")
 
-        async with page.expect_download(timeout=180000) as dl_info:
-            await page.evaluate("""
-                () => {
-                    const btns = document.querySelectorAll('button');
-                    for (const btn of btns) {
-                        if (btn.textContent.trim() === 'Imprimir' && btn.id !== 'btnImprimir') {
-                            btn.click();
-                            break;
-                        }
+        # clica Imprimir para iniciar geração
+        await page.evaluate("""
+            () => {
+                const btns = document.querySelectorAll('button');
+                for (const btn of btns) {
+                    if (btn.textContent.trim() === 'Imprimir' && btn.id !== 'btnImprimir') {
+                        btn.click();
+                        break;
                     }
                 }
-            """)
-            print("  Aguardando geração (até 3 min)...")
-            await page.wait_for_selector("text=Relatório gerado com êxito", timeout=180000)
-            print("  Relatório gerado! Baixando...")
-            await page.evaluate("""
-                () => {
-                    const btns = document.querySelectorAll('button');
-                    for (const btn of btns) {
-                        if (btn.textContent.trim() === 'Abrir') {
-                            btn.click();
-                            break;
-                        }
-                    }
-                }
-            """)
+            }
+        """)
+        print("  Aguardando geração (até 3 min)...")
+        await page.wait_for_selector("text=Relatório gerado com êxito", timeout=180000)
+        print("  Relatório gerado! Capturando download...")
 
-        download = await dl_info.value
-        await download.save_as(dest)
+        # captura download — o "Abrir" abre popup com o arquivo
+        # escuta no contexto inteiro para pegar o download de qualquer página/popup
+        async with context.expect_page() as popup_info:
+            async with context.expect_event("download") as dl_info:
+                await page.evaluate("""
+                    () => {
+                        const btns = document.querySelectorAll('button');
+                        for (const btn of btns) {
+                            if (btn.textContent.trim() === 'Abrir') {
+                                btn.click();
+                                break;
+                            }
+                        }
+                    }
+                """)
+                try:
+                    download = await asyncio.wait_for(
+                        asyncio.shield(asyncio.ensure_future(dl_info.value)),
+                        timeout=30
+                    )
+                    await download.save_as(dest)
+                    print(f"  ✓ Download via evento: {dest}")
+                except Exception:
+                    # download veio como popup — pega URL e baixa via requests
+                    try:
+                        popup = await asyncio.wait_for(
+                            asyncio.shield(asyncio.ensure_future(popup_info.value)),
+                            timeout=10
+                        )
+                        await popup.wait_for_load_state("domcontentloaded", timeout=15000)
+                        file_url = popup.url
+                        print(f"  URL do arquivo: {file_url}")
+                        cookies = await context.cookies()
+                        import requests as _req
+                        cookie_dict = {c["name"]: c["value"] for c in cookies}
+                        resp = _req.get(file_url, cookies=cookie_dict, timeout=60)
+                        resp.raise_for_status()
+                        with open(dest, "wb") as f:
+                            f.write(resp.content)
+                        print(f"  ✓ Download via popup URL: {dest}")
+                        await popup.close()
+                    except Exception as e2:
+                        raise RuntimeError(f"Não foi possível capturar o arquivo: {e2}")
+
         print(f"  ✓ Download: {dest}")
         await browser.close()
         return dest
