@@ -103,7 +103,17 @@ async def download_excel(download_dir: str) -> str | None:
         await page.wait_for_timeout(4000)
         print(f"  URL autenticada: {page.url}")
 
-        # ── PASSO 4: navega para cálculos ──
+        # ── PASSO 4: fecha modal de aviso se houver ──
+        try:
+            fechar = await page.wait_for_selector('button:has-text("Fechar")', timeout=5000)
+            if fechar:
+                await fechar.click()
+                print("  Modal de aviso fechado")
+                await page.wait_for_timeout(1000)
+        except:
+            pass
+
+        # ── PASSO 5: navega para cálculos ──
         print("  Navegando para Cálculos...")
         await page.goto("https://pontoweb.secullum.com.br/#/calculos", wait_until="networkidle")
         await page.wait_for_timeout(4000)
