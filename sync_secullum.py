@@ -75,19 +75,10 @@ async def download_excel(download_dir: str) -> str | None:
 
         # ── PASSO 2: preenche login ──
         print("  Fazendo login...")
-        await page.wait_for_selector('input[type="email"], input[type="text"]', timeout=15000)
-        await page.fill('input[type="email"], input[type="text"]', SECULLUM_USER)
-        await page.fill('input[type="password"]', SECULLUM_PASS)
-        # clica no botão submit da form de login (não no link "Esqueci minha senha")
-        await page.evaluate("""
-            () => {
-                const form = document.querySelector('form');
-                if (form) {
-                    const btn = form.querySelector('button[type="submit"], input[type="submit"], button');
-                    if (btn) btn.click();
-                }
-            }
-        """)
+        await page.wait_for_selector('input[name="Email"]', timeout=15000)
+        await page.fill('input[name="Email"]', SECULLUM_USER)
+        await page.fill('input[name="Senha"]', SECULLUM_PASS)
+        await page.click('button[type="submit"]')
 
         # DEBUG — salva screenshot como artefato
         await page.wait_for_timeout(5000)
