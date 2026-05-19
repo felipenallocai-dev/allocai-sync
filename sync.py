@@ -193,6 +193,7 @@ def upsert_procedimentos(registros: list, import_id: str) -> dict:
                 errors += len(to_upsert_changed)
                 updated -= len(to_upsert_changed)
 
+    # Salva staging
     for i in range(0, len(staging_batch), 500):
         try:
             supabase.table("staging_nefrocloud")\
@@ -200,6 +201,19 @@ def upsert_procedimentos(registros: list, import_id: str) -> dict:
                 .execute()
         except Exception as e:
             print(f"  Erro staging: {e}")
+
+    # ── LIMPEZA AUTOMÁTICA ──────────────────────────────────────────
+    # Remove staging com mais de 48h — evita estouro do banco
+    try:
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
+        supabase.table("staging_nefrocloud")\
+            .delete()\
+            .lt("created_at", cutoff)\
+            .execute()
+        print("  Staging limpa: registros com mais de 48h removidos")
+    except Exception as e:
+        print(f"  Erro ao limpar staging: {e}")
+    # ───────────────────────────────────────────────────────────────
 
     return {"inserted": inserted, "updated": updated,
             "unchanged": unchanged, "errors": errors}
