@@ -78,7 +78,16 @@ async def download_excel(download_dir: str) -> str | None:
         await page.wait_for_selector('input[type="email"], input[type="text"]', timeout=15000)
         await page.fill('input[type="email"], input[type="text"]', SECULLUM_USER)
         await page.fill('input[type="password"]', SECULLUM_PASS)
-        await page.click('button[type="submit"], input[type="submit"], button:has-text("Entrar")')
+        # clica no botão submit da form de login (não no link "Esqueci minha senha")
+        await page.evaluate("""
+            () => {
+                const form = document.querySelector('form');
+                if (form) {
+                    const btn = form.querySelector('button[type="submit"], input[type="submit"], button');
+                    if (btn) btn.click();
+                }
+            }
+        """)
 
         # DEBUG — salva screenshot como artefato
         await page.wait_for_timeout(5000)
