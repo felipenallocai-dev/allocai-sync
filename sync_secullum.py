@@ -56,51 +56,44 @@ async def download_excel(download_dir: str) -> str | None:
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+            args=["--no-sandbox", "--disable-setuid-sandbox",
+                  "--disable-dev-shm-usage", "--disable-gpu"]
         )
         context = await browser.new_context(accept_downloads=True)
         page = await context.new_page()
 
-        # LOGIN VIA API — injeta token no browser
-        import requests as _requests
-        print("  Login via API...")
-        resp = _requests.post(
-            "https://autenticador.secullum.com.br/Token",
-            data={"grant_type": "password", "username": SECULLUM_USER, "password": SECULLUM_PASS, "client_id": "3001"},
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            timeout=30,
+        # ── PASSO 1: vai direto para o autenticador ──
+        print("  Abrindo autenticador Secullum...")
+        await page.goto(
+            "https://autenticador.secullum.com.br/Authorization"
+            "?response_type=code&client_id=3001"
+            "&redirect_uri=https://pontoweb.secullum.com.br/Auth",
+            wait_until="networkidle"
         )
-        resp.raise_for_status()
-        token = resp.json()["access_token"]
-        print("  Token obtido. Abrindo browser autenticado...")
-
-        # abre a página e injeta o token via localStorage/cookie
-        await page.goto("https://pontoweb.secullum.com.br")
         await page.wait_for_timeout(2000)
-
-        # injeta token no localStorage
-        await page.evaluate("""(t) => {
-            localStorage.setItem('access_token', t);
-            localStorage.setItem('token', t);
-            localStorage.setItem('userToken', t);
-        }""", token)
-
-        # adiciona cookie com o token
-        await context.add_cookies([{
-            "name": "access_token",
-            "value": token,
-            "domain": "pontoweb.secullum.com.br",
-            "path": "/",
-        }])
-
-        # navega para cálculos
-        await page.goto("https://pontoweb.secullum.com.br/#/calculos")
-        await page.wait_for_timeout(5000)
         print(f"  URL: {page.url}")
-        print("  Login OK.")
 
-        # FECHA MODAIS via JavaScript — remove do DOM sem clicar
-        await page.wait_for_timeout(2000)
+        # ── PASSO 2: preenche login ──
+        print("  Fazendo login...")
+        await page.wait_for_selector('input[type="email"], input[type="text"]', timeout=15000)
+        await page.fill('input[type="email"], input[type="text"]', SECULLUM_USER)
+        await page.fill('input[type="password"]', SECULLUM_PASS)
+        await page.click('button[type="submit"], input[type="submit"], button:has-text("Entrar")')
+
+        # ── PASSO 3: aguarda redirecionamento de volta para pontoweb ──
+        print("  Aguardando redirecionamento...")
+        await page.wait_for_url("**/pontoweb.secullum.com.br/**", timeout=30000)
+        await page.wait_for_timeout(4000)
+        print(f"  URL autenticada: {page.url}")
+
+        # ── PASSO 4: navega para cálculos ──
+        print("  Navegando para Cálculos...")
+        await page.goto("https://pontoweb.secullum.com.br/#/calculos", wait_until="networkidle")
+        await page.wait_for_timeout(4000)
+
+        # fecha modais se houver
+        await page.keyboard.press("Escape")
+        await page.wait_for_timeout(500)
         await page.evaluate("""
             () => {
                 document.querySelectorAll('.ReactModal__Overlay').forEach(el => el.remove());
@@ -110,30 +103,14 @@ async def download_excel(download_dir: str) -> str | None:
         """)
         await page.wait_for_timeout(1000)
 
-        # NAVEGA PARA CÁLCULOS via menu (igual ao codegen)
-        await page.get_by_role("link", name=" Relatórios ").click()
-        await page.get_by_role("link", name="Cálculos").click()
-        await page.wait_for_timeout(3000)
-
-        # FECHA MODAIS via ESC e JS
-        await page.keyboard.press("Escape")
-        await page.wait_for_timeout(500)
-        await page.evaluate("""
-            () => {
-                document.querySelectorAll('.ReactModal__Overlay').forEach(el => el.remove());
-                document.querySelectorAll('.ReactModalPortal').forEach(el => el.remove());
-            }
-        """)
-        await page.wait_for_timeout(1000)
-
-        # CLICA EM IMPRIMIR — aguarda até 30s
+        # ── PASSO 5: abre modal de impressão ──
         print("  Abrindo modal de impressão...")
         await page.wait_for_selector("#btnImprimir", timeout=30000)
         await page.wait_for_timeout(500)
         await page.evaluate("document.querySelector('#btnImprimir').click()")
         await page.wait_for_timeout(2000)
 
-        # CONFIGURA O MODAL
+        # ── PASSO 6: configura o modal ──
         # Imprimir todos os funcionários
         await page.locator("label").filter(has_text="Imprimir todos funcionários").click()
         await page.wait_for_timeout(500)
@@ -148,12 +125,11 @@ async def download_excel(download_dir: str) -> str | None:
         await page.locator("#formatoImpressao").select_option("6")
         await page.wait_for_timeout(500)
 
-        # GERA O RELATÓRIO — captura download ANTES de clicar
-        print("  Gerando relatório...")
+        # ── PASSO 7: gera e baixa o relatório ──
+        print("  Gerando relatório Excel...")
         dest = os.path.join(download_dir, "secullum.xlsx")
 
         async with page.expect_download(timeout=180000) as dl_info:
-            # clica Imprimir via JS para evitar bloqueios
             await page.evaluate("""
                 () => {
                     const btns = document.querySelectorAll('button');
@@ -166,9 +142,8 @@ async def download_excel(download_dir: str) -> str | None:
                 }
             """)
             print("  Aguardando geração (até 3 min)...")
-            # aguarda o botão Abrir aparecer e clica
             await page.wait_for_selector("text=Relatório gerado com êxito", timeout=180000)
-            print("  Relatório gerado! Clicando Abrir...")
+            print("  Relatório gerado! Baixando...")
             await page.evaluate("""
                 () => {
                     const btns = document.querySelectorAll('button');
@@ -247,19 +222,19 @@ def parse_excel(path):
                     data_date = datetime.strptime(col0[:10], "%d/%m/%Y").date()
                 except ValueError:
                     k += 1; continue
-                ent1 = dr[1] if len(dr) > 1 else None
-                sai1 = dr[2] if len(dr) > 2 else None
-                sai2 = dr[4] if len(dr) > 4 else None
-                sai3 = dr[6] if len(dr) > 6 else None
+                ent1  = dr[1]  if len(dr) > 1  else None
+                sai1  = dr[2]  if len(dr) > 2  else None
+                sai2  = dr[4]  if len(dr) > 4  else None
+                sai3  = dr[6]  if len(dr) > 6  else None
                 ex50  = dr[8]  if len(dr) > 8  else None
                 ex100 = dr[9]  if len(dr) > 9  else None
                 exnot = dr[10] if len(dr) > 10 else None
-                if is_texto(ent1, "FOLGA"): status = "folga"
-                elif is_texto(ent1, "FALTA"): status = "falta"
-                elif is_texto(ent1, "FÉRIAS", "FERIAS"): status = "ferias"
-                elif is_texto(ent1, "INSS", "AFASTADO"): status = "afastado"
-                elif isinstance(ent1, timedelta): status = "presente"
-                else: status = "ausente"
+                if is_texto(ent1, "FOLGA"):                   status = "folga"
+                elif is_texto(ent1, "FALTA"):                 status = "falta"
+                elif is_texto(ent1, "FÉRIAS", "FERIAS"):      status = "ferias"
+                elif is_texto(ent1, "INSS", "AFASTADO"):      status = "afastado"
+                elif isinstance(ent1, timedelta):             status = "presente"
+                else:                                         status = "ausente"
                 entrada_t = timedelta_to_time(ent1) if status == "presente" else None
                 saida_t = next((timedelta_to_time(s) for s in (sai3, sai2, sai1) if timedelta_to_time(s)), None)
                 horas_min = None
@@ -288,7 +263,10 @@ _technician_cache = {}
 
 def upsert_technician(nome, company_id):
     if nome in _technician_cache: return _technician_cache[nome]
-    res = supabase.table("technicians").upsert({"company_id": company_id, "name": nome}, on_conflict="company_id,name").select("id").execute()
+    res = supabase.table("technicians").upsert(
+        {"company_id": company_id, "name": nome},
+        on_conflict="company_id,name"
+    ).select("id").execute()
     tech_id = res.data[0]["id"]
     _technician_cache[nome] = tech_id
     return tech_id
@@ -300,27 +278,61 @@ def upsert_presenca(registros):
     for r in registros:
         try:
             tech_id = upsert_technician(r["nome"], company_id)
-            batch.append({"technician_id": tech_id, "company_id": company_id, "date": r["date"], "shift": r["shift"], "status": r["status"], "entrada": r["entrada"], "saida": r["saida"], "horas_trabalhadas_min": r["horas_trabalhadas_min"], "extra_min": r["extra_min"], "matricula": r["matricula"], "departamento": r["departamento"], "fonte": "secullum", "registered_by": None})
+            batch.append({
+                "technician_id": tech_id,
+                "company_id": company_id,
+                "date": r["date"],
+                "shift": r["shift"],
+                "status": r["status"],
+                "entrada": r["entrada"],
+                "saida": r["saida"],
+                "horas_trabalhadas_min": r["horas_trabalhadas_min"],
+                "extra_min": r["extra_min"],
+                "matricula": r["matricula"],
+                "departamento": r["departamento"],
+                "fonte": "secullum",
+                "registered_by": None,
+            })
         except Exception as e:
             print(f"  Erro {r['nome']}: {e}"); errors += 1
     if batch:
         existing_ids = set()
         try:
-            res = supabase.table("daily_presence").select("technician_id,date,shift").in_("technician_id", list({b["technician_id"] for b in batch})).in_("date", list({b["date"] for b in batch})).execute()
-            for row in res.data: existing_ids.add((row["technician_id"], row["date"], row["shift"]))
+            res = supabase.table("daily_presence")\
+                .select("technician_id,date,shift")\
+                .in_("technician_id", list({b["technician_id"] for b in batch}))\
+                .in_("date", list({b["date"] for b in batch}))\
+                .execute()
+            for row in res.data:
+                existing_ids.add((row["technician_id"], row["date"], row["shift"]))
         except: pass
         for b in batch:
             if (b["technician_id"], b["date"], b["shift"]) in existing_ids: updated += 1
             else: inserted += 1
         for i in range(0, len(batch), 200):
-            try: supabase.table("daily_presence").upsert(batch[i:i+200], on_conflict="technician_id,date,shift").execute()
-            except Exception as e: print(f"  Erro upsert: {e}"); errors += len(batch[i:i+200])
+            try:
+                supabase.table("daily_presence")\
+                    .upsert(batch[i:i+200], on_conflict="technician_id,date,shift")\
+                    .execute()
+            except Exception as e:
+                print(f"  Erro upsert: {e}"); errors += len(batch[i:i+200])
     return {"inserted": inserted, "updated": updated, "errors": errors}
 
 def registrar_log(status, fetched, stats, error=None):
     company_id = get_company_id()
     now = datetime.now(timezone.utc).isoformat()
-    supabase.table("import_logs").insert({"company_id": company_id, "source": "secullum_ponto", "started_at": now, "finished_at": datetime.now(timezone.utc).isoformat(), "status": status, "records_fetched": fetched, "records_inserted": stats.get("inserted", 0), "records_updated": stats.get("updated", 0), "records_unchanged": 0, "error_detail": error}).execute()
+    supabase.table("import_logs").insert({
+        "company_id": company_id,
+        "source": "secullum_ponto",
+        "started_at": now,
+        "finished_at": datetime.now(timezone.utc).isoformat(),
+        "status": status,
+        "records_fetched": fetched,
+        "records_inserted": stats.get("inserted", 0),
+        "records_updated": stats.get("updated", 0),
+        "records_unchanged": 0,
+        "error_detail": error,
+    }).execute()
 
 async def main():
     print(f"\n{'='*50}")
