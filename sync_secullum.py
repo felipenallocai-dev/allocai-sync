@@ -80,6 +80,15 @@ async def download_excel(download_dir: str) -> str | None:
         await page.fill('input[type="password"]', SECULLUM_PASS)
         await page.click('button[type="submit"], input[type="submit"], button:has-text("Entrar")')
 
+        # DEBUG
+        await page.wait_for_timeout(5000)
+        print(f"  URL após Entrar: {page.url}")
+        await page.screenshot(path="/tmp/debug_login.png")
+        import base64
+        with open("/tmp/debug_login.png", "rb") as f:
+            b64 = base64.b64encode(f.read()).decode()
+        print(f"  SCREENSHOT_B64:{b64[:300]}...")
+
         # ── PASSO 3: aguarda redirecionamento de volta para pontoweb ──
         print("  Aguardando redirecionamento...")
         await page.wait_for_url("**/pontoweb.secullum.com.br/**", timeout=30000)
