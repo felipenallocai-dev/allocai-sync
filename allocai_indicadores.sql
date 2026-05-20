@@ -15,13 +15,28 @@
 -- ============================================================
 -- 1. UTILIZAÇÃO DO PLANTÃO POR TÉCNICO
 -- Σ horas de procedimentos realizados / 8.8h
+-- Separa utilização normal vs hora extra:
+-- dias além de 14 no mês no daily_presence = hora extra (regime 12x36)
 -- ============================================================
-WITH horas_proc AS (
+WITH dias_rank AS (
+    -- ordena dias presentes por tecnico por mes; > 14 = hora extra
+    SELECT
+        technician_id,
+        date,
+        ROW_NUMBER() OVER (
+            PARTITION BY technician_id, DATE_TRUNC('month', date)
+            ORDER BY date
+        ) AS dia_no_mes
+    FROM daily_presence
+    WHERE status = 'presente'
+),
+horas_proc AS (
     SELECT
         p.technician1 AS tecnico_nome,
         dp.date,
         dp.shift,
         dp.departamento,
+        CASE WHEN dr.dia_no_mes > 14 THEN 'hora_extra' ELSE 'normal' END AS tipo_dia,
         SUM(
             CASE p.procedure_type
                 WHEN 'HDI'  THEN 240
@@ -41,8 +56,12 @@ WITH horas_proc AS (
         )
         AND dp.date = p.procedure_date
         AND dp.status = 'presente'
+    JOIN dias_rank dr
+        ON dr.technician_id = dp.technician_id
+        AND dr.date = dp.date
     WHERE p.status = 'REALIZADO'
-    GROUP BY p.technician1, dp.date, dp.shift, dp.departamento
+    GROUP BY p.technician1, dp.date, dp.shift, dp.departamento,
+             CASE WHEN dr.dia_no_mes > 14 THEN 'hora_extra' ELSE 'normal' END
 
     UNION ALL
 
@@ -51,6 +70,7 @@ WITH horas_proc AS (
         dp.date,
         dp.shift,
         dp.departamento,
+        CASE WHEN dr.dia_no_mes > 14 THEN 'hora_extra' ELSE 'normal' END AS tipo_dia,
         SUM(
             CASE p.procedure_type
                 WHEN 'HDI'  THEN 240
@@ -70,20 +90,25 @@ WITH horas_proc AS (
         )
         AND dp.date = p.procedure_date
         AND dp.status = 'presente'
+    JOIN dias_rank dr
+        ON dr.technician_id = dp.technician_id
+        AND dr.date = dp.date
     WHERE p.status = 'REALIZADO'
       AND p.technician2 IS NOT NULL
-    GROUP BY p.technician2, dp.date, dp.shift, dp.departamento
+    GROUP BY p.technician2, dp.date, dp.shift, dp.departamento,
+             CASE WHEN dr.dia_no_mes > 14 THEN 'hora_extra' ELSE 'normal' END
 )
 SELECT
     tecnico_nome,
     departamento,
-    COUNT(*) AS dias_com_proc,
+    tipo_dia,
+    COUNT(*) AS dias,
     ROUND(AVG(minutos_proc)) AS media_min_proc,
     ROUND(AVG(minutos_proc) / 528.0 * 100, 1) AS util_plantao_pct,
     ROUND(AVG(528.0 - minutos_proc)) AS ociosidade_media_min
 FROM horas_proc
-GROUP BY tecnico_nome, departamento
-ORDER BY util_plantao_pct DESC;
+GROUP BY tecnico_nome, departamento, tipo_dia
+ORDER BY tecnico_nome, departamento, tipo_dia;
 
 
 -- ============================================================
@@ -174,8 +199,8 @@ ORDER BY p.procedure_date DESC, p.start_time;
 
 
 -- ============================================================
--- 6. GAP PRESCRIÇÃO → INÍCIO (SLA urgência)
--- Meta: < 120 min para urgências
+-- 6. GAP PRESCRIÇÃO → INÍCIO (SLA urgência/emergência)
+-- Meta: < 120 min para urgências e emergências
 -- ============================================================
 SELECT
     h.name AS hospital,
@@ -211,9 +236,30 @@ FROM procedures p
 JOIN hospitals h ON h.id = p.hospital_id
 WHERE p.prescription_datetime IS NOT NULL
   AND p.start_time IS NOT NULL
-  AND p.classification = 'Urgência'
+  AND p.classification IN ('Urgência','Emergência')
 GROUP BY h.name, p.classification
 ORDER BY gap_medio_min DESC;
+
+
+-- ============================================================
+-- 6b. DIAGNÓSTICO — NULOS EM prescription_date (URGÊNCIA/EMERGÊNCIA)
+-- Entende por que prescription_datetime está nulo no Q6
+-- ============================================================
+SELECT
+    classification,
+    COUNT(*)                                                                 AS total,
+    SUM(CASE WHEN prescription_date IS NULL THEN 1 ELSE 0 END)              AS nulos_prescricao,
+    SUM(CASE WHEN start_time        IS NULL THEN 1 ELSE 0 END)              AS nulos_start_time,
+    SUM(CASE WHEN prescription_date IS NOT NULL
+              AND start_time        IS NOT NULL THEN 1 ELSE 0 END)          AS com_dados_completos,
+    ROUND(
+        SUM(CASE WHEN prescription_date IS NULL THEN 1 ELSE 0 END)::NUMERIC
+        / COUNT(*) * 100, 1
+    )                                                                        AS pct_nulos_prescricao
+FROM procedures
+WHERE classification IN ('Urgência','Emergência')
+GROUP BY classification
+ORDER BY classification;
 
 
 -- ============================================================
@@ -345,18 +391,106 @@ ORDER BY d.data DESC, d.turno;
 SELECT
     departamento,
     shift AS turno,
-    COUNT(*) AS total_registros,
+    SUM(CASE WHEN status NOT IN ('folga','ferias') THEN 1 ELSE 0 END) AS dias_esperados,
     SUM(CASE WHEN status = 'presente' THEN 1 ELSE 0 END) AS presentes,
     SUM(CASE WHEN status = 'falta' THEN 1 ELSE 0 END) AS faltas,
     SUM(CASE WHEN status = 'atestado' THEN 1 ELSE 0 END) AS atestados,
-    SUM(CASE WHEN status IN ('ausente','folga','ferias') THEN 1 ELSE 0 END) AS outros_ausentes,
+    SUM(CASE WHEN status = 'ausente' THEN 1 ELSE 0 END) AS ausentes,
     ROUND(
         (1 - SUM(CASE WHEN status = 'presente' THEN 1 ELSE 0 END)::NUMERIC
-        / NULLIF(COUNT(*), 0)) * 100, 1
+        / NULLIF(SUM(CASE WHEN status NOT IN ('folga','ferias') THEN 1 ELSE 0 END), 0)) * 100, 1
     ) AS pct_absenteismo
 FROM daily_presence
 WHERE date BETWEEN '2026-01-01' AND '2026-05-15'
 GROUP BY departamento, shift
+ORDER BY pct_absenteismo DESC;
+
+
+-- ============================================================
+-- 11b. TOP 20 TÉCNICOS COM MAIOR ABSENTEÍSMO
+-- ============================================================
+SELECT
+    t.name AS tecnico,
+    dp.departamento,
+    SUM(CASE WHEN dp.status NOT IN ('folga','ferias') THEN 1 ELSE 0 END) AS dias_esperados,
+    SUM(CASE WHEN dp.status = 'presente'              THEN 1 ELSE 0 END) AS presentes,
+    SUM(CASE WHEN dp.status NOT IN ('presente','folga','ferias') THEN 1 ELSE 0 END) AS dias_ausentes,
+    ROUND(
+        SUM(CASE WHEN dp.status NOT IN ('presente','folga','ferias') THEN 1 ELSE 0 END)::NUMERIC
+        / NULLIF(SUM(CASE WHEN dp.status NOT IN ('folga','ferias') THEN 1 ELSE 0 END), 0) * 100, 1
+    ) AS pct_absenteismo
+FROM daily_presence dp
+JOIN technicians t ON t.id = dp.technician_id
+WHERE dp.date BETWEEN '2026-01-01' AND '2026-05-15'
+GROUP BY t.name, dp.departamento
+HAVING SUM(CASE WHEN dp.status NOT IN ('folga','ferias') THEN 1 ELSE 0 END) > 0
+ORDER BY pct_absenteismo DESC
+LIMIT 20;
+
+
+-- ============================================================
+-- 11c. ABSENTEÍSMO POR MÊS (TENDÊNCIA JAN-MAI 2026)
+-- ============================================================
+SELECT
+    TO_CHAR(date, 'YYYY-MM') AS mes,
+    SUM(CASE WHEN status NOT IN ('folga','ferias') THEN 1 ELSE 0 END) AS dias_esperados,
+    SUM(CASE WHEN status = 'presente'              THEN 1 ELSE 0 END) AS presentes,
+    SUM(CASE WHEN status = 'falta'                 THEN 1 ELSE 0 END) AS faltas,
+    SUM(CASE WHEN status = 'atestado'              THEN 1 ELSE 0 END) AS atestados,
+    SUM(CASE WHEN status = 'ausente'               THEN 1 ELSE 0 END) AS ausentes,
+    ROUND(
+        (1 - SUM(CASE WHEN status = 'presente' THEN 1 ELSE 0 END)::NUMERIC
+        / NULLIF(SUM(CASE WHEN status NOT IN ('folga','ferias') THEN 1 ELSE 0 END), 0)) * 100, 1
+    ) AS pct_absenteismo
+FROM daily_presence
+WHERE date BETWEEN '2026-01-01' AND '2026-05-15'
+GROUP BY TO_CHAR(date, 'YYYY-MM')
+ORDER BY mes;
+
+
+-- ============================================================
+-- 11d. FALTA VS ATESTADO VS AUSENTE POR DEPARTAMENTO
+-- ============================================================
+SELECT
+    departamento,
+    SUM(CASE WHEN status NOT IN ('folga','ferias') THEN 1 ELSE 0 END)  AS dias_esperados,
+    SUM(CASE WHEN status = 'falta'    THEN 1 ELSE 0 END)               AS faltas,
+    ROUND(SUM(CASE WHEN status = 'falta'    THEN 1 ELSE 0 END)::NUMERIC
+        / NULLIF(SUM(CASE WHEN status NOT IN ('folga','ferias') THEN 1 ELSE 0 END),0)*100,1) AS pct_falta,
+    SUM(CASE WHEN status = 'atestado' THEN 1 ELSE 0 END)               AS atestados,
+    ROUND(SUM(CASE WHEN status = 'atestado' THEN 1 ELSE 0 END)::NUMERIC
+        / NULLIF(SUM(CASE WHEN status NOT IN ('folga','ferias') THEN 1 ELSE 0 END),0)*100,1) AS pct_atestado,
+    SUM(CASE WHEN status = 'ausente'  THEN 1 ELSE 0 END)               AS ausentes,
+    ROUND(SUM(CASE WHEN status = 'ausente'  THEN 1 ELSE 0 END)::NUMERIC
+        / NULLIF(SUM(CASE WHEN status NOT IN ('folga','ferias') THEN 1 ELSE 0 END),0)*100,1) AS pct_ausente
+FROM daily_presence
+WHERE date BETWEEN '2026-01-01' AND '2026-05-15'
+GROUP BY departamento
+ORDER BY departamento;
+
+
+-- ============================================================
+-- 11e. LISTA NOMINAL — ABSENTEÍSMO ACIMA DE 30%
+-- ============================================================
+SELECT
+    t.name AS tecnico,
+    dp.departamento,
+    dp.shift AS turno,
+    SUM(CASE WHEN dp.status NOT IN ('folga','ferias') THEN 1 ELSE 0 END) AS dias_esperados,
+    SUM(CASE WHEN dp.status = 'presente'              THEN 1 ELSE 0 END) AS presentes,
+    SUM(CASE WHEN dp.status = 'falta'                 THEN 1 ELSE 0 END) AS faltas,
+    SUM(CASE WHEN dp.status = 'atestado'              THEN 1 ELSE 0 END) AS atestados,
+    SUM(CASE WHEN dp.status = 'ausente'               THEN 1 ELSE 0 END) AS ausentes,
+    ROUND(
+        (1 - SUM(CASE WHEN dp.status = 'presente' THEN 1 ELSE 0 END)::NUMERIC
+        / NULLIF(SUM(CASE WHEN dp.status NOT IN ('folga','ferias') THEN 1 ELSE 0 END), 0)) * 100, 1
+    ) AS pct_absenteismo
+FROM daily_presence dp
+JOIN technicians t ON t.id = dp.technician_id
+WHERE dp.date BETWEEN '2026-01-01' AND '2026-05-15'
+GROUP BY t.name, dp.departamento, dp.shift
+HAVING (1 - SUM(CASE WHEN dp.status = 'presente' THEN 1 ELSE 0 END)::NUMERIC
+        / NULLIF(SUM(CASE WHEN dp.status NOT IN ('folga','ferias') THEN 1 ELSE 0 END), 0)) * 100 > 30
 ORDER BY pct_absenteismo DESC;
 
 
