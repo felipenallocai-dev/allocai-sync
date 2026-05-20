@@ -8,6 +8,15 @@ on:
 jobs:
   keepalive:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
-      - uses: gautamkrishnar/keepalive-workflow@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Keep alive commit
+        run: |
+          git config user.email "action@github.com"
+          git config user.name "GitHub Action"
+          git commit --allow-empty -m "chore: keepalive [skip ci]"
+          git push
